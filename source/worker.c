@@ -17,6 +17,10 @@
 // on peut ici définir une structure stockant tout ce dont le worker
 // a besoin : le nombre premier dont il a la charge, ...
 
+typedef struct {
+    // compléter si besoin
+} worker_t;
+
 
 /************************************************************************
  * Usage et analyse des arguments passés en ligne de commande

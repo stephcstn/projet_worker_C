@@ -5,6 +5,10 @@
 //    - des constantes pour rendre plus lisible les comunications
 //    - des fonctions communes (création tubes, écriture dans un tube,
 //      manipulation de sémaphores, ...)
+#define CLIENT_TO_MASTER_PIPE "ctom.fifo"
+#define MASTER_TO_CLIENT_PIPE "mtoc.fifo"
+
+#define SEM_KEY 0x1234
 
 // ordres possibles pour le master
 #define ORDER_NONE                0
