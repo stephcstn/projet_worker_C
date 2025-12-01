@@ -8,7 +8,13 @@
 #define CLIENT_TO_MASTER_PIPE "ctom.fifo"
 #define MASTER_TO_CLIENT_PIPE "mtoc.fifo"
 
-#define SEM_KEY 0x1234
+// Clés IPC pour les sémaphores
+#define MUTEX_KEY 0x1234
+#define SYNC_KEY 0x2345
+
+// Noms des FIFOs
+#define FIFO_CLIENT_MASTER "fifos/prime_client_master"
+#define FIFO_MASTER_CLIENT "fifos/prime_master_client"
 
 // ordres possibles pour le master
 #define ORDER_NONE                0
