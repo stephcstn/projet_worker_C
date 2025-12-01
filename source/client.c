@@ -1,41 +1,44 @@
+// ce fichier contient l'implémentation du client
+// il gère les ordres envoyés au master et dispose d'un mode local multithread
+
 #if defined HAVE_CONFIG_H
 #include "config.h"
 #endif
+
+#define _XOPEN_SOURCE 700
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/sem.h>
 #include <unistd.h>
-#include "sys/types.h"
-#include "sys/stat.h"
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <pthread.h>
+#include <math.h>
 
 #include "myassert.h"
-
 #include "master_client.h"
 
-// chaines possibles pour le premier paramètre de la ligne de commande
+// constantes pour les noms d'ordres
 #define TK_STOP      "stop"
 #define TK_COMPUTE   "compute"
 #define TK_HOW_MANY  "howmany"
 #define TK_HIGHEST   "highest"
 #define TK_LOCAL     "local"
 
-/************************************************************************
- * Usage et analyse des arguments passés en ligne de commande
- ************************************************************************/
-
+// analyse et vérification des arguments
 static void usage(const char *exeName, const char *message)
 {
     fprintf(stderr, "usage : %s <ordre> [<nombre>]\n", exeName);
-    fprintf(stderr, "   ordre \"" TK_STOP  "\" : arrêt master\n");
-    fprintf(stderr, "   ordre \"" TK_COMPUTE  "\" : calcul de nombre premier\n");
+    fprintf(stderr, "   ordre \"%s\" : arrêt master\n", TK_STOP);
+    fprintf(stderr, "   ordre \"%s\" : calcul de nombre premier\n", TK_COMPUTE);
     fprintf(stderr, "                       <nombre> doit être fourni\n");
-    fprintf(stderr, "   ordre \"" TK_HOW_MANY "\" : combien de nombres premiers calculés\n");
-    fprintf(stderr, "   ordre \"" TK_HIGHEST "\" : quel est le plus grand nombre premier calculé\n");
-    fprintf(stderr, "   ordre \"" TK_LOCAL  "\" : calcul de nombres premiers en local\n");
+    fprintf(stderr, "   ordre \"%s\" : combien de nombres premiers calculés\n", TK_HOW_MANY);
+    fprintf(stderr, "   ordre \"%s\" : quel est le plus grand nombre premier calculé\n", TK_HIGHEST);
+    fprintf(stderr, "   ordre \"%s\" : calcul de nombres premiers en local\n", TK_LOCAL);
     if (message != NULL)
         fprintf(stderr, "message : %s\n", message);
     exit(EXIT_FAILURE);
@@ -44,10 +47,8 @@ static void usage(const char *exeName, const char *message)
 static int parseArgs(int argc, char * argv[], int *number)
 {
     int order = ORDER_NONE;
-
     if ((argc != 2) && (argc != 3))
         usage(argv[0], "Nombre d'arguments incorrect");
-
     if (strcmp(argv[1], TK_STOP) == 0)
         order = ORDER_STOP;
     else if (strcmp(argv[1], TK_COMPUTE) == 0)
@@ -58,105 +59,179 @@ static int parseArgs(int argc, char * argv[], int *number)
         order = ORDER_HIGHEST_PRIME;
     else if (strcmp(argv[1], TK_LOCAL) == 0)
         order = ORDER_COMPUTE_PRIME_LOCAL;
-    
     if (order == ORDER_NONE)
         usage(argv[0], "ordre incorrect");
     if ((order == ORDER_STOP) && (argc != 2))
-        usage(argv[0], TK_STOP" : il ne faut pas de second argument");
+        usage(argv[0], "il ne faut pas de second argument");
     if ((order == ORDER_COMPUTE_PRIME) && (argc != 3))
-        usage(argv[0], TK_COMPUTE " : il faut le second argument");
+        usage(argv[0], "il faut le second argument");
     if ((order == ORDER_HOW_MANY_PRIME) && (argc != 2))
-        usage(argv[0], TK_HOW_MANY" : il ne faut pas de second argument");
+        usage(argv[0], "il ne faut pas de second argument");
     if ((order == ORDER_HIGHEST_PRIME) && (argc != 2))
-        usage(argv[0], TK_HIGHEST " : il ne faut pas de second argument");
+        usage(argv[0], "il ne faut pas de second argument");
     if ((order == ORDER_COMPUTE_PRIME_LOCAL) && (argc != 3))
-        usage(argv[0], TK_LOCAL " : il faut le second argument");
+        usage(argv[0], "il faut le second argument");
     if ((order == ORDER_COMPUTE_PRIME) || (order == ORDER_COMPUTE_PRIME_LOCAL))
     {
-        *number = strtol(argv[2], NULL, 10);
+        *number = (int)strtol(argv[2], NULL, 10);
         if (*number < 2)
-             usage(argv[0], "le nombre doit être >= 2");
-    }       
-    
+            usage(argv[0], "le nombre doit être >= 2");
+    }
     return order;
 }
+/* structure pour passer les arguments aux threads */
+typedef struct {
+    bool *prime_table;      // tableau partagé des booléens (vrai = premier)
+    int N;                  // borne supérieure pour le crible
+    int divisor;            // diviseur traité par ce thread
+    pthread_mutex_t *mutex; // mutex pour protéger le tableau partagé
+} ThreadData;
 
+/* fonction exécutée par chaque thread */
+void *sieve_thread(void *arg) {
+    ThreadData *data = (ThreadData *)arg;
 
-/************************************************************************
- * Fonction principale
- ************************************************************************/
+    // on commence à marquer les multiples du diviseur à partir de 2*divisor
+    int start = 2 * data->divisor;
+
+    while (start <= data->N) {
+        // section critique : modification du tableau partagé
+        int ret = pthread_mutex_lock(data->mutex);
+        myassert(ret == 0, "pthread_mutex_lock failed");
+
+        // marquer le multiple comme non premier
+        data->prime_table[start] = false;
+
+        ret = pthread_mutex_unlock(data->mutex);
+        myassert(ret == 0, "pthread_mutex_unlock failed");
+
+        start += data->divisor; // passer au multiple suivant
+    }
+
+    return NULL;
+}
+
+/* fonction principale pour calculer localement les nombres premiers jusqu'à N */
+void compute_local_primes(int N) {
+    if (N < 2) {
+        printf("Pas de nombres premiers jusqu'à %d\n", N);
+        return;
+    }
+
+    // création du tableau des booléens, toutes les cases initialisées à true
+    bool *prime_table = malloc((N + 1) * sizeof(bool));
+    if (!prime_table) {
+        perror("malloc");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 2; i <= N; i++)
+        prime_table[i] = true;
+
+    // nombre de threads : un pour chaque diviseur de 2 à sqrt(N)
+    int sqrtN = (int)sqrt(N);
+    int nb_threads = sqrtN - 1;
+
+    // allocation dynamique des threads et de leurs arguments
+    pthread_t *threads = malloc(nb_threads * sizeof(pthread_t));
+    ThreadData *thread_args = malloc(nb_threads * sizeof(ThreadData));
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; // mutex local pour protéger le tableau
+
+    // création des threads
+    for (int i = 2; i <= sqrtN; i++) {
+        int idx = i - 2; // index dans le tableau des threads
+        thread_args[idx].prime_table = prime_table;
+        thread_args[idx].N = N;
+        thread_args[idx].divisor = i;
+        thread_args[idx].mutex = &mutex;
+
+        int ret = pthread_create(&threads[idx], NULL, sieve_thread, &thread_args[idx]);
+        myassert(ret == 0, "pthread_create failed");
+    }
+
+    // attendre que tous les threads aient fini
+    for (int i = 0; i < nb_threads; i++) {
+        int ret = pthread_join(threads[i], NULL);
+        myassert(ret == 0, "pthread_join failed");
+    }
+
+    // affichage des nombres premiers
+    printf("Nombres premiers jusqu'à %d :\n", N);
+    for (int i = 2; i <= N; i++) {
+        if (prime_table[i])
+            printf("%d ", i);
+    }
+    printf("\n");
+
+    // nettoyage
+    free(prime_table);
+    free(threads);
+    free(thread_args);
+    pthread_mutex_destroy(&mutex);
+}
 
 int main(int argc, char * argv[])
 {
-
-    // order peut valoir 5 valeurs (cf. master_client.h) :
-    //      - ORDER_COMPUTE_PRIME_LOCAL
-    //      - ORDER_STOP
-    //      - ORDER_COMPUTE_PRIME
-    //      - ORDER_HOW_MANY_PRIME
-    //      - ORDER_HIGHEST_PRIME
-    //
-    // si c'est ORDER_COMPUTE_PRIME_LOCAL
-    //    alors c'est un code complètement à part multi-thread
-    // sinon
-    //    - entrer en section critique :
-    //           . pour empêcher que 2 clients communiquent simultanément
-    //           . le mutex est déjà créé par le master
-    //    - ouvrir les tubes nommés (ils sont déjà créés par le master)
-    //           . les ouvertures sont bloquantes, il faut s'assurer que
-    //             le master ouvre les tubes dans le même ordre
-    //    - envoyer l'ordre et les données éventuelles au master
-    //    - attendre la réponse sur le second tube
-    //    - sortir de la section critique
-    //    - libérer les ressources (fermeture des tubes, ...)
-    //    - débloquer le master grâce à un second sémaphore (cf. ci-dessous)
-    // 
-    // Une fois que le master a envoyé la réponse au client, il se bloque
-    // sur un sémaphore ; le dernier point permet donc au master de continuer
-    //
-    // N'hésitez pas à faire des fonctions annexes ; si la fonction main
-    // ne dépassait pas une trentaine de lignes, ce serait bien.
+    // lecture du nombre ou de l'ordre depuis la ligne de commande
     int number = 0;
     int order = parseArgs(argc, argv, &number);
 
+    // si on veut calculer les nombres premiers localement
     if (order == ORDER_COMPUTE_PRIME_LOCAL) {
-        computeLocal(number);
+        compute_local_primes(number);
         return EXIT_SUCCESS;
     }
 
-    // entrer en section critique
-    int semId = semget(SEM_KEY, 1, 0);
-    myassert(semId != -1, "semget client");
+    // sinon, on utilise le master
+    int sem_mutex = semget(MUTEX_KEY, 1, 0); // récupérer le sémaphore mutex
+    myassert(sem_mutex != -1, "semget mutex");
+    
+    int sem_sync = semget(SYNC_KEY, 1, 0); // récupérer le sémaphore sync
+    myassert(sem_sync != -1, "semget sync");
 
-    struct sembuf operationMoins = {0, -1, 0};
-    semop(semId, &operationMoins, 1);
+    // prendre le mutex avant d'accéder aux FIFOs
+    struct sembuf operationPrendre = {0, -1, 0};
+    semop(sem_mutex, &operationPrendre, 1);
 
-    // ouverture des tubes
-    int fdWrite = open(CLIENT_TO_MASTER_PIPE, O_WRONLY);
-    myassert(fdWrite != -1, "open CLIENT_TO_MASTER_PIPE");
+    const char *fifo1 = FIFO_CLIENT_MASTER; // FIFO pour écrire vers le master
+    const char *fifo2 = FIFO_MASTER_CLIENT; // FIFO pour lire depuis le master
 
-    int fdRead = open(MASTER_TO_CLIENT_PIPE, O_RDONLY);
-    myassert(fdRead != -1, "open MASTER_TO_CLIENT_PIPE");
+    int fdWrite = open(fifo1, O_WRONLY); // ouverture FIFO écriture
+    myassert(fdWrite != -1, "open fifo write");
 
-    // envoyer l’ordre
-    write(fdWrite, &order, sizeof(order));
+    int fdRead = open(fifo2, O_RDONLY); // ouverture FIFO lecture
+    myassert(fdRead != -1, "open fifo read");
 
-    // envoyer le nombre si besoin
+    write(fdWrite, &order, sizeof(int)); // envoyer l'ordre au master
+
     if (order == ORDER_COMPUTE_PRIME)
-        write(fdWrite, &number, sizeof(number));
+        write(fdWrite, &number, sizeof(int)); // envoyer le nombre à tester
 
-    // attendre la réponse
     int response;
-    read(fdRead, &response, sizeof(response));
-    printf("Réponse du master = %d\n", response);
+    read(fdRead, &response, sizeof(int)); // lire la réponse du master
 
-    // fermer les tubes
-    close(fdWrite);
-    close(fdRead);
+    // affichage du résultat selon l'ordre
+    if (order == ORDER_COMPUTE_PRIME) {
+        if (response)
+            printf("%d est premier\n", number);
+        else
+            printf("%d n'est pas premier\n", number);
+    } else if (order == ORDER_HOW_MANY_PRIME) {
+        printf("%d\n", response);
+    } else if (order == ORDER_HIGHEST_PRIME) {
+        printf("%d\n", response);
+    }
 
-    // débloquer le master
-    struct sembuf V = {0, 1, 0};
-    semop(semId, &V, 1);
+    // fermeture des FIFOs
+    int ret = close(fdWrite);
+    myassert(ret != -1, "close fifo write");
+
+    ret = close(fdRead);
+    myassert(ret != -1, "close fifo read");
+
+    // libération des sémaphores
+    struct sembuf operationVendre = {0, 1, 0};
+    semop(sem_mutex, &operationVendre, 1);
+    semop(sem_sync, &operationVendre, 1);
 
     return EXIT_SUCCESS;
 }
