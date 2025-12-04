@@ -115,16 +115,37 @@ static void create_next_worker(struct worker_t *worker, int newPrime)
 
 void loop(struct worker_t *worker)
 {
-    // boucle infinie :
-    //    attendre l'arrivée d'un nombre à tester
-    //    si ordre d'arrêt
-    //       si il y a un worker suivant, transmettre l'ordre et attendre sa fin
-    //       sortir de la boucle
-    //    sinon c'est un nombre à tester, 4 possibilités :
-    //           - le nombre est premier
-    //           - le nombre n'est pas premier
-    //           - s'il y a un worker suivant lui transmettre le nombre
-    //           - s'il n'y a pas de worker suivant, le créer
+    while (true) {
+        int n;
+        ssize_t ret = read(worker->MasterToWorker, &n, sizeof(int)); // lire un nombre du master
+
+        if (ret == 0)  // fin du pipe
+            break;
+
+        myassert(ret == sizeof(int), "read from previous worker"); // vérifier la lecture
+
+        if (n < 0) { // signal d'arrêt
+            if (worker->WorkerToNext != -1) { // transmettre l'arrêt au worker suivant
+                write(worker->WorkerToNext, &n, sizeof(int));
+                close(worker->WorkerToNext); // fermer le pipe vers le suivant
+                waitpid(worker->nextPid, NULL, 0); // attendre la fin du worker suivant
+            }
+            break; // sortir de la boucle
+        }
+
+        if (n == worker->n_prime) {
+            send_result(worker, n, 1); // nombre premier : le signaler
+        } else if (n % worker->n_prime == 0) {
+            send_result(worker, n, 0); // divisible par ce worker : pas premier
+        } else {
+            if (worker->WorkerToNext != -1) {
+                write(worker->WorkerToNext, &n, sizeof(int)); // transmettre au prochain worker
+            } else {
+                send_result(worker, n, 1);  // pas divisible : c'est un nouveau premier
+                create_next_worker(worker, n); // créer un nouveau worker pour ce nombre
+            }
+        }
+    }
 }
 
 /************************************************************************
@@ -133,15 +154,14 @@ void loop(struct worker_t *worker)
 
 int main(int argc, char * argv[])
 {
-    parseArgs(argc, argv /*, structure à remplir*/);
-    
-    // Si on est créé c'est qu'on est un nombre premier
-    // Envoyer au master un message positif pour dire
-    // que le nombre testé est bien premier
+    struct worker_t worker;
 
-    loop(/* paramètres */);
+    parseArgs(argc, argv, &worker); // récupérer les paramètres
 
-    // libérer les ressources : fermeture des files descriptors par exemple
+    loop(&worker); // boucle principale de traitement
 
-    return EXIT_SUCCESS;
+    close(worker.MasterToWorker); // fermer le pipe master -> worker
+    close(worker.WorkerToMaster); // fermer le pipe worker -> master
+
+    return EXIT_SUCCESS; // terminer le worker
 }
