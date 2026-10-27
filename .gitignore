@@ -1,0 +1,12 @@
+.vscode/
+
+# Build artifacts
+/source/*.o
+/source/*.d
+/source/client
+/source/master
+/source/worker
+
+# Operating system files
+.DS_Store
+Thumbs.db
